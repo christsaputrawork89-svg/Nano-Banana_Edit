@@ -1,0 +1,7 @@
+{
+  "name": "CHR EDIT_AI - Nano Banana Pro",
+  "description": "Professional AI image editing and expansion using Gemini 2.5 Flash (Nano Banana). High-precision retouching, restoration, and outpainting.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
