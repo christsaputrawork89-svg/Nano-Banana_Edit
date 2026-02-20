@@ -23,4 +23,6 @@ export type MarkerColor = 'red' | 'blue' | 'green' | 'yellow' | null;
 export interface MarkingAction {
   color: MarkerColor;
   points: { x: number; y: number }[];
+  type?: 'brush' | 'fill';
+  mask?: ImageData;
 }

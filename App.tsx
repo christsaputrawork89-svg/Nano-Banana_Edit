@@ -20,7 +20,7 @@ const QUICK_TOOLS = [
 ];
 
 const MARKER_COLORS: { id: MarkerColor; label: string; hex: string; desc: string }[] = [
-  { id: 'red', label: 'Modify', hex: '#f87171', desc: 'Target area' },
+  { id: 'red', label: 'Modify', hex: '#f87171', desc: 'Click to Select' },
   { id: 'blue', label: 'Protect', hex: '#60a5fa', desc: 'Keep original' },
   { id: 'green', label: 'Enhance', hex: '#4ade80', desc: 'Boost quality' },
   { id: 'yellow', label: 'Suggest', hex: '#facc15', desc: 'AI Creative' },
@@ -79,7 +79,25 @@ const App: React.FC = () => {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
     markings.forEach(marking => {
-      if (!marking || !marking.points || marking.points.length < 2) return;
+      if (!marking) return;
+
+      if (marking.type === 'fill' && marking.mask) {
+        // Draw mask onto the display canvas
+        // The mask is in NATURAL size, so we need to scale it to DISPLAY size
+        // We can use a temp canvas to hold the mask, then drawImage with scaling
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = marking.mask.width;
+        tempCanvas.height = marking.mask.height;
+        const tempCtx = tempCanvas.getContext('2d');
+        if (tempCtx) {
+          tempCtx.putImageData(marking.mask, 0, 0);
+          // Draw scaled
+          ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
+        }
+        return;
+      }
+
+      if (!marking.points || marking.points.length < 2) return;
       
       const colorHex = MARKER_COLORS.find(c => c.id === marking.color)?.hex;
       if (!colorHex) return;
@@ -121,9 +139,86 @@ const App: React.FC = () => {
     setReferenceImages(prev => prev.filter((_, i) => i !== index));
   };
 
+  const floodFill = (
+    ctx: CanvasRenderingContext2D, 
+    x: number, 
+    y: number, 
+    fillColor: { r: number, g: number, b: number, a: number }, 
+    tolerance: number
+  ): ImageData | null => {
+    const width = ctx.canvas.width;
+    const height = ctx.canvas.height;
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    
+    const stack = [[x, y]];
+    const visited = new Set(); // To prevent infinite loops, though color check usually suffices
+    
+    const pos = (y * width + x) * 4;
+    const startR = data[pos];
+    const startG = data[pos + 1];
+    const startB = data[pos + 2];
+    const startA = data[pos + 3];
+
+    // Helper to check if color matches
+    const match = (pos: number) => {
+      const r = data[pos];
+      const g = data[pos + 1];
+      const b = data[pos + 2];
+      const a = data[pos + 3];
+      
+      // If transparent, ignore? Or treat as color?
+      // For now, simple Euclidean distance
+      const dist = Math.sqrt(
+        Math.pow(r - startR, 2) +
+        Math.pow(g - startG, 2) +
+        Math.pow(b - startB, 2) +
+        Math.pow(a - startA, 2)
+      );
+      return dist <= tolerance;
+    };
+
+    // Helper to set color
+    const setPixel = (pos: number) => {
+      data[pos] = fillColor.r;
+      data[pos + 1] = fillColor.g;
+      data[pos + 2] = fillColor.b;
+      data[pos + 3] = fillColor.a;
+    };
+
+    // Create a new ImageData for the mask
+    const maskImageData = new ImageData(width, height);
+    const maskData = maskImageData.data;
+
+    while (stack.length > 0) {
+      const [cx, cy] = stack.pop()!;
+      const key = `${cx},${cy}`;
+      if (visited.has(key)) continue;
+      
+      const currentPos = (cy * width + cx) * 4;
+      
+      if (cx >= 0 && cx < width && cy >= 0 && cy < height && match(currentPos)) {
+        visited.add(key);
+        
+        // Set pixel in the MASK, not the original image
+        const maskPos = currentPos;
+        maskData[maskPos] = fillColor.r;
+        maskData[maskPos + 1] = fillColor.g;
+        maskData[maskPos + 2] = fillColor.b;
+        maskData[maskPos + 3] = fillColor.a;
+
+        stack.push([cx + 1, cy]);
+        stack.push([cx - 1, cy]);
+        stack.push([cx, cy + 1]);
+        stack.push([cx, cy - 1]);
+      }
+    }
+    
+    return maskImageData;
+  };
+
   const startDrawing = (e: React.MouseEvent | React.TouchEvent) => {
-    if (!activeMarker || !canvasRef.current || !originalImage) return;
-    setIsDrawing(true);
+    if (!activeMarker || !canvasRef.current || !originalImage || !imageRef.current) return;
     
     const rect = canvasRef.current.getBoundingClientRect();
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
@@ -131,12 +226,45 @@ const App: React.FC = () => {
     
     const x = clientX - rect.left;
     const y = clientY - rect.top;
-    
-    setMarkings(prev => [...prev, { color: activeMarker, points: [{ x, y }] }]);
+
+    if (activeMarker === 'red') {
+      // Flood Fill Logic for 'Modify' tool
+      const sourceImg = imageRef.current;
+      
+      // Create an offscreen canvas to read pixel data from the NATURAL size image
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = sourceImg.naturalWidth;
+      offCanvas.height = sourceImg.naturalHeight;
+      const ctx = offCanvas.getContext('2d');
+      if (!ctx) return;
+      
+      ctx.drawImage(sourceImg, 0, 0);
+      
+      // Map client coordinates to natural coordinates
+      const scaleX = sourceImg.naturalWidth / sourceImg.clientWidth;
+      const scaleY = sourceImg.naturalHeight / sourceImg.clientHeight;
+      const naturalX = Math.floor(x * scaleX);
+      const naturalY = Math.floor(y * scaleY);
+
+      // Perform flood fill
+      // Red color with some transparency for the mask
+      const mask = floodFill(ctx, naturalX, naturalY, { r: 248, g: 113, b: 113, a: 150 }, 40); // Tolerance 40
+      
+      if (mask) {
+        setMarkings(prev => [...prev, { color: activeMarker, points: [], type: 'fill', mask }]);
+      }
+    } else {
+      // Standard Brush Logic
+      setIsDrawing(true);
+      setMarkings(prev => [...prev, { color: activeMarker, points: [{ x, y }], type: 'brush' }]);
+    }
   };
 
   const draw = (e: React.MouseEvent | React.TouchEvent) => {
     if (!isDrawing || !activeMarker || !canvasRef.current || !originalImage) return;
+    // If it's a fill operation, we don't draw on drag
+    if (activeMarker === 'red') return;
+
     e.preventDefault(); // Prevent scrolling on touch
     
     const rect = canvasRef.current.getBoundingClientRect();
@@ -185,7 +313,25 @@ const App: React.FC = () => {
     ctx.drawImage(sourceImg, 0, 0);
     
     markings.forEach(marking => {
-      if (!marking || !marking.points || marking.points.length < 2) return;
+      if (!marking) return;
+      
+      if (marking.type === 'fill' && marking.mask) {
+        // Draw the mask directly onto the export canvas
+        // Since the mask is already in natural size, we can just put it?
+        // No, putImageData overwrites. We need to composite.
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = sourceImg.naturalWidth;
+        tempCanvas.height = sourceImg.naturalHeight;
+        const tempCtx = tempCanvas.getContext('2d');
+        if (tempCtx) {
+          tempCtx.putImageData(marking.mask, 0, 0);
+          ctx.drawImage(tempCanvas, 0, 0);
+        }
+        return;
+      }
+
+      // Brush logic
+      if (!marking.points || marking.points.length < 2) return;
       const colorObj = MARKER_COLORS.find(c => c.id === marking.color);
       if (!colorObj) return;
 
